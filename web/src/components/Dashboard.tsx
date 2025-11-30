@@ -2,6 +2,7 @@ import { TrafficStats, DropStats, SessionInfo } from '../services/api'
 import TrafficChart from './TrafficChart'
 import DropAlertPanel from './DropAlertPanel'
 import SessionTable from './SessionTable'
+import SessionTrafficChart from './SessionTrafficChart'
 import Topology from './Topology'
 
 interface DashboardProps {
@@ -227,6 +228,17 @@ export default function Dashboard({ metrics, drops, sessions }: DashboardProps) 
             <div className="bg-slate-800/50 rounded-xl p-5 border border-slate-700">
                 <h2 className="text-lg font-semibold text-white mb-4">Live Traffic (Last 60s)</h2>
                 <TrafficChart metrics={metrics} />
+            </div>
+
+            {/* Session Traffic Analysis - NEW */}
+            <div className="bg-slate-800/50 rounded-xl p-5 border border-slate-700">
+                <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-lg font-semibold text-white">Per-Session Traffic Analysis</h2>
+                    <span className="text-sm text-slate-400">
+                        {sessions.length} active session{sessions.length !== 1 ? 's' : ''}
+                    </span>
+                </div>
+                <SessionTrafficChart sessions={sessions} />
             </div>
 
             {/* Two Column Layout */}

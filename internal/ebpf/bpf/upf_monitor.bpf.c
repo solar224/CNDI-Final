@@ -20,22 +20,26 @@
 #define DIRECTION_UPLINK 0
 #define DIRECTION_DOWNLINK 1
 
-// Drop reasons - Enhanced categories
-#define DROP_REASON_NO_PDR 0          // No PDR rule matched
-#define DROP_REASON_INVALID_TEID 1    // Invalid or unknown TEID
-#define DROP_REASON_QOS 2             // QoS policy violation
-#define DROP_REASON_KERNEL 3          // Generic kernel drop
-#define DROP_REASON_NO_FAR 4          // No FAR action defined
-#define DROP_REASON_BUFFER_OVERFLOW 5 // Ring buffer or queue overflow
-#define DROP_REASON_TTL_EXPIRED 6     // TTL/Hop limit expired
-#define DROP_REASON_MTU_EXCEEDED 7    // Packet too large
-#define DROP_REASON_MALFORMED 8       // Malformed GTP header
-#define DROP_REASON_NO_TUNNEL 9       // GTP tunnel not found
-#define DROP_REASON_ENCAP_FAIL 10     // Encapsulation failed
-#define DROP_REASON_DECAP_FAIL 11     // Decapsulation failed
-#define DROP_REASON_ROUTING 12        // Routing decision drop
-#define DROP_REASON_POLICY 13         // Policy/ACL drop
-#define DROP_REASON_MEMORY 14         // Memory allocation failure
+// Drop reasons - Direct mapping from gtp5g error codes (1:1)
+// These match exactly with gtp5g/src/gtpu/encap.c definitions
+#define DROP_REASON_PKT_DROPPED 1      // Generic packet dropped
+#define DROP_REASON_ECHO_RESP_CREATE 2 // GTP Echo Response creation failed
+#define DROP_REASON_NO_ROUTE 3         // No route to destination
+#define DROP_REASON_PULL_FAILED 4      // skb_pull failed
+#define DROP_REASON_INVALID_EXT_HDR 5  // Invalid GTP extension header
+#define DROP_REASON_NO_PDR 6           // No PDR rule matched
+#define DROP_REASON_GENERAL 7          // General error
+#define DROP_REASON_UL_GATE_CLOSED 8   // Uplink gate closed (QoS)
+#define DROP_REASON_DL_GATE_CLOSED 9   // Downlink gate closed (QoS)
+#define DROP_REASON_PDR_NULL 10        // PDR pointer is NULL
+#define DROP_REASON_NO_F_TEID 11       // No F-TEID found
+#define DROP_REASON_URR_REPORT_FAIL 12 // URR report failed
+#define DROP_REASON_RED_PACKET 13      // QoS RED drop
+#define DROP_REASON_IP_XMIT_FAIL 14    // IP transmit failed
+#define DROP_REASON_NOT_TPDU 15        // Not a T-PDU
+#define DROP_REASON_PULL_HDR_FAIL 16   // Header pull failed
+#define DROP_REASON_NETIF_RX_FAIL 17   // netif_rx failed
+#define DROP_REASON_UNKNOWN 255        // Unknown/other reasons
 
 // ============================================================================
 // Data Structures
@@ -292,8 +296,98 @@ static __always_inline void emit_packet_event(__u32 teid, __u32 src_ip, __u32 ds
 }
 
 // ============================================================================
+// gtp5g error code pass-through (1:1 mapping)
+// No conversion needed - we pass the error_code directly as drop reason
+// ============================================================================
+static __always_inline __u8 map_gtp5g_error_to_reason(int error_code)
+{
+    // Direct pass-through: gtp5g error codes 1-17 map to drop reasons 1-17
+    if (error_code >= 1 && error_code <= 17)
+    {
+        return (__u8)error_code;
+    }
+    return DROP_REASON_UNKNOWN;
+}
+
+// ============================================================================
 // Kprobes - Hook gtp5g functions
 // ============================================================================
+
+// Hook: gtp5g_trace_drop - THE PRIMARY DROP DETECTION HOOK
+// This is called by gtp5g whenever a packet is dropped with specific reason
+SEC("kprobe/gtp5g_trace_drop")
+int BPF_KPROBE(kprobe_gtp5g_trace_drop, int error_code, struct sk_buff *skb)
+{
+    __u32 len = 0;
+    __u32 teid = 0;
+    __u32 src_ip = 0, dst_ip = 0;
+    __u16 src_port = 0, dst_port = 0;
+    __u8 reason;
+    __u8 direction = 0; // Will try to determine from packet
+    unsigned char *head;
+    __u16 transport_header;
+    __u16 network_header;
+
+    // Map gtp5g error code to our drop reason
+    // gtp5g error codes 1-17 map directly to drop reasons 1-17
+    if (error_code >= 1 && error_code <= 17)
+    {
+        reason = (__u8)error_code;
+    }
+    else
+    {
+        reason = DROP_REASON_UNKNOWN;
+    }
+
+    if (!skb)
+    {
+        // Even without skb, we should record the drop with the reason
+        emit_drop_event(0, 0, 0, 0, 0, 0, reason, 0);
+        return 0;
+    }
+
+    // Read packet length
+    len = BPF_CORE_READ(skb, len);
+
+    // Try to extract packet info
+    head = BPF_CORE_READ(skb, head);
+    transport_header = BPF_CORE_READ(skb, transport_header);
+    network_header = BPF_CORE_READ(skb, network_header);
+
+    if (head && network_header > 0)
+    {
+        unsigned char *ip_header = head + network_header;
+        bpf_probe_read_kernel(&src_ip, sizeof(src_ip), ip_header + 12);
+        bpf_probe_read_kernel(&dst_ip, sizeof(dst_ip), ip_header + 16);
+    }
+
+    if (head && transport_header > 0)
+    {
+        unsigned char *udp_header = head + transport_header;
+        bpf_probe_read_kernel(&src_port, sizeof(src_port), udp_header);
+        bpf_probe_read_kernel(&dst_port, sizeof(dst_port), udp_header + 2);
+        src_port = bpf_ntohs(src_port);
+        dst_port = bpf_ntohs(dst_port);
+
+        // If destination port is GTP-U (2152), likely uplink
+        if (dst_port == GTP_U_PORT)
+        {
+            direction = DIRECTION_UPLINK;
+            // Try to extract TEID from GTP header
+            unsigned char *gtp_header = head + transport_header + 8;
+            bpf_probe_read_kernel(&teid, sizeof(teid), gtp_header + 4);
+            teid = bpf_ntohl(teid);
+        }
+        else if (src_port == GTP_U_PORT)
+        {
+            direction = DIRECTION_DOWNLINK;
+        }
+    }
+
+    emit_drop_event(teid, src_ip, dst_ip, src_port, dst_port, len, reason, direction);
+
+    return 0;
+}
 
 // Hook: gtp5g_encap_recv - Entry point for uplink packets
 // This function is called when a GTP-U packet is received on the UDP socket
@@ -444,159 +538,31 @@ int BPF_KPROBE(kprobe_gtp5g_handle_skb, struct sk_buff *skb)
 }
 
 // Hook: kretprobe for pdr_find_by_gtp1u - Detect PDR lookup failures
-// Returns NULL when no matching PDR is found (NO_PDR_MATCH drop)
+// NOTE: Drop events are now captured by kprobe_gtp5g_trace_drop which is more reliable
+// This kretprobe is kept for potential future use but does not emit drop events
 SEC("kretprobe/pdr_find_by_gtp1u")
 int BPF_KRETPROBE(kretprobe_pdr_find_by_gtp1u, void *ret)
 {
-    __u32 pid;
-    struct pending_pkt_info *pkt_info;
-
-    // If return value is NULL, PDR lookup failed
-    if (ret == NULL)
-    {
-        // Get packet info saved by kprobe_gtp5g_encap_recv
-        pid = bpf_get_current_pid_tgid() >> 32;
-        pkt_info = bpf_map_lookup_elem(&pending_pkts, &pid);
-
-        if (pkt_info && pkt_info->valid)
-        {
-            emit_drop_event(pkt_info->teid, pkt_info->src_ip, pkt_info->dst_ip,
-                            pkt_info->src_port, pkt_info->dst_port,
-                            pkt_info->pkt_len, DROP_REASON_NO_PDR, DIRECTION_UPLINK);
-            // Mark as processed to avoid double counting
-            pkt_info->valid = 0;
-            bpf_map_update_elem(&pending_pkts, &pid, pkt_info, BPF_ANY);
-        }
-        else
-        {
-            emit_drop_event(0, 0, 0, 0, 0, 0, DROP_REASON_NO_PDR, DIRECTION_UPLINK);
-        }
-    }
+    // kprobe_gtp5g_trace_drop now handles all drop detection
+    // This hook is kept as a backup but doesn't emit events to avoid duplicates
     return 0;
 }
 
 // Hook: kretprobe for pdr_find_by_ipv4 - Detect PDR lookup failures (downlink)
-// Returns NULL when no matching PDR is found (NO_PDR_MATCH drop)
+// NOTE: Drop events are now captured by kprobe_gtp5g_trace_drop which is more reliable
+// This kretprobe is kept for potential future use but does not emit drop events
 SEC("kretprobe/pdr_find_by_ipv4")
 int BPF_KRETPROBE(kretprobe_pdr_find_by_ipv4, void *ret)
 {
-    __u32 pid;
-    struct pending_pkt_info *pkt_info;
-
-    // If return value is NULL, PDR lookup failed
-    if (ret == NULL)
-    {
-        // Get packet info saved by kprobe_gtp5g_dev_xmit
-        pid = bpf_get_current_pid_tgid() >> 32;
-        pkt_info = bpf_map_lookup_elem(&pending_pkts, &pid);
-
-        if (pkt_info && pkt_info->valid)
-        {
-            emit_drop_event(pkt_info->teid, pkt_info->src_ip, pkt_info->dst_ip,
-                            pkt_info->src_port, pkt_info->dst_port,
-                            pkt_info->pkt_len, DROP_REASON_NO_PDR, DIRECTION_DOWNLINK);
-            // Mark as processed to avoid double counting
-            pkt_info->valid = 0;
-            bpf_map_update_elem(&pending_pkts, &pid, pkt_info, BPF_ANY);
-        }
-        else
-        {
-            emit_drop_event(0, 0, 0, 0, 0, 0, DROP_REASON_NO_PDR, DIRECTION_DOWNLINK);
-        }
-    }
+    // kprobe_gtp5g_trace_drop now handles all drop detection
+    // This hook is kept as a backup but doesn't emit events to avoid duplicates
     return 0;
 }
 
-// Hook: kretprobe for gtp5g_encap_recv - Detect uplink drops
-// Returns < 0 indicate packet was dropped
-SEC("kretprobe/gtp5g_encap_recv")
-int BPF_KRETPROBE(kretprobe_gtp5g_encap_recv, int ret)
-{
-    __u32 pid;
-    struct pending_pkt_info *pkt_info;
-
-    if (ret < 0)
-    {
-        // Packet was dropped during uplink processing
-        __u8 reason = DROP_REASON_DECAP_FAIL;
-
-        // Map return codes to drop reasons
-        if (ret == -2) // ENOENT - no PDR
-        {
-            reason = DROP_REASON_NO_PDR;
-        }
-        else if (ret == -22) // EINVAL - invalid TEID
-        {
-            reason = DROP_REASON_INVALID_TEID;
-        }
-        else if (ret == -12) // ENOMEM
-        {
-            reason = DROP_REASON_MEMORY;
-        }
-
-        // Get packet info saved by kprobe
-        pid = bpf_get_current_pid_tgid() >> 32;
-        pkt_info = bpf_map_lookup_elem(&pending_pkts, &pid);
-
-        if (pkt_info && pkt_info->valid)
-        {
-            emit_drop_event(pkt_info->teid, pkt_info->src_ip, pkt_info->dst_ip,
-                            pkt_info->src_port, pkt_info->dst_port,
-                            pkt_info->pkt_len, reason, DIRECTION_UPLINK);
-            // Clean up
-            bpf_map_delete_elem(&pending_pkts, &pid);
-        }
-        else
-        {
-            emit_drop_event(0, 0, 0, 0, 0, 0, reason, DIRECTION_UPLINK);
-        }
-    }
-    else
-    {
-        // Success - clean up pending entry
-        pid = bpf_get_current_pid_tgid() >> 32;
-        bpf_map_delete_elem(&pending_pkts, &pid);
-    }
-    return 0;
-}
-
-// Hook: kretprobe for gtp5g_dev_xmit - Detect downlink drops
-SEC("kretprobe/gtp5g_dev_xmit")
-int BPF_KRETPROBE(kretprobe_gtp5g_dev_xmit, int ret)
-{
-    __u32 pid;
-    struct pending_pkt_info *pkt_info;
-
-    if (ret != 0) // NETDEV_TX_OK = 0
-    {
-        // Packet was dropped during downlink processing
-        __u8 reason = DROP_REASON_ENCAP_FAIL;
-
-        // Get packet info saved by kprobe
-        pid = bpf_get_current_pid_tgid() >> 32;
-        pkt_info = bpf_map_lookup_elem(&pending_pkts, &pid);
-
-        if (pkt_info && pkt_info->valid)
-        {
-            emit_drop_event(pkt_info->teid, pkt_info->src_ip, pkt_info->dst_ip,
-                            pkt_info->src_port, pkt_info->dst_port,
-                            pkt_info->pkt_len, reason, DIRECTION_DOWNLINK);
-            // Clean up
-            bpf_map_delete_elem(&pending_pkts, &pid);
-        }
-        else
-        {
-            emit_drop_event(0, 0, 0, 0, 0, 0, reason, DIRECTION_DOWNLINK);
-        }
-    }
-    else
-    {
-        // Success - clean up pending entry
-        pid = bpf_get_current_pid_tgid() >> 32;
-        bpf_map_delete_elem(&pending_pkts, &pid);
-    }
-    return 0;
-}
+// NOTE: kretprobe for gtp5g_encap_recv and gtp5g_dev_xmit were REMOVED
+// because they always return 0 (NETDEV_TX_OK) even on errors.
+// Drop detection is now handled by kprobe/gtp5g_trace_drop which is
+// the proper hook point that gtp5g calls for all drop events.
 
 // Hook: kfree_skb tracepoint - Detect packet drops
 // This tracepoint fires whenever a packet is dropped in the kernel
@@ -606,7 +572,7 @@ int tracepoint_kfree_skb(struct trace_event_raw_kfree_skb *ctx)
     struct sk_buff *skb;
     void *location;
     __u32 len;
-    __u8 reason = DROP_REASON_KERNEL;
+    __u8 reason = DROP_REASON_GENERAL; // Code 7: General kernel drop
 
     // Check if drop tracing is enabled (config key 1)
     __u32 key = 1;
@@ -683,7 +649,7 @@ int BPF_KRETPROBE(kretprobe_ip_forward, int ret)
 
     if (ret != 0)
     {
-        emit_drop_event(0, 0, 0, 0, 0, 0, DROP_REASON_ROUTING, 0);
+        emit_drop_event(0, 0, 0, 0, 0, 0, DROP_REASON_NO_ROUTE, 0); // Code 3: No route
     }
     return 0;
 }

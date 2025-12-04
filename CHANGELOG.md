@@ -18,7 +18,7 @@ All notable changes to the 5G-DPOP project will be documented in this file.
     - Implemented a **Two-Pass Processing** strategy to correctly identify node types.
     - Added logic to distinguish between **Access Peers** (gNBs sending uplink traffic) and **Core Peers** (PSA-UPFs receiving N9 traffic).
     - Prioritized `UplinkPeerIP` for accurate Radio Access Network identification.
-- **Agent (Deployment)**: Identified requirement to bind the agent to the Docker bridge interface (`br-free5gc`) when running with `free5gc-compose` to correctly capture PFCP signaling.
+- **Agent (Deployment)**: Identified requirement to bind the agent to the Docker bridge intearface (`br-free5gc`) when running with `free5gc-compose` to correctly capture PFCP signaling.
 
 ### Fixed
 - **API Server**: Resolved file corruption issues in `cmd/api-server/main.go` (duplicate/truncated content).

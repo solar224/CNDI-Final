@@ -53,336 +53,387 @@ export interface DropReasonInfo {
     layer: 'GTP' | 'PFCP' | 'Kernel' | 'QoS' | 'Routing'
 }
 
-// Complete drop reason database based on eBPF kernel module definitions
+// Complete drop reason database - Direct 1:1 mapping with gtp5g error codes
+// These match exactly with gtp5g/src/gtpu/encap.c definitions (codes 1-17)
 export const DROP_REASON_DATABASE: Record<string, DropReasonInfo> = {
-    'NO_PDR_MATCH': {
-        code: '0',
+    'PKT_DROPPED': {
+        code: '1',
+        name: 'Packet Dropped',
+        description: 'Generic packet drop in gtp5g module. The packet was explicitly dropped during processing.',
+        impact: 'Packet is dropped. Root cause needs further investigation based on context.',
+        possibleCauses: [
+            'Generic drop during packet processing',
+            'Internal gtp5g decision to drop packet',
+            'Packet failed validation checks',
+            'Unknown internal error'
+        ],
+        suggestedActions: [
+            'Check dmesg for gtp5g specific errors: dmesg | grep gtp5g',
+            'Enable gtp5g debug logging if available',
+            'Check packet capture for anomalies',
+            'Review UPF configuration'
+        ],
+        severity: 'warning',
+        layer: 'GTP'
+    },
+    'ECHO_RESP_CREATE': {
+        code: '2',
+        name: 'Echo Response Creation Failed',
+        description: 'Failed to create GTP Echo Response message. This is part of GTP path management.',
+        impact: 'GTP path health check may fail. Path management disrupted.',
+        possibleCauses: [
+            'Memory allocation failure for Echo Response',
+            'Socket buffer allocation failed',
+            'Internal gtp5g error',
+            'Resource exhaustion'
+        ],
+        suggestedActions: [
+            'Check system memory: free -h',
+            'Monitor gtp5g module: dmesg | grep gtp5g',
+            'Check GTP-U socket status',
+            'Verify UDP port 2152 is operational'
+        ],
+        severity: 'warning',
+        layer: 'GTP'
+    },
+    'NO_ROUTE': {
+        code: '3',
+        name: 'No Route',
+        description: 'No routing entry found for the packet destination. Cannot forward the packet.',
+        impact: 'Packet cannot reach destination. Complete connectivity failure for this flow.',
+        possibleCauses: [
+            'Missing route to destination network',
+            'Routing table not configured properly',
+            'Next hop unreachable',
+            'Network namespace routing issue',
+            'VRF misconfiguration'
+        ],
+        suggestedActions: [
+            'Check routing table: ip route show',
+            'Verify default gateway: ip route get <dst_ip>',
+            'Check network namespace: ip netns exec <ns> ip route',
+            'Verify UPF N6 interface configuration',
+            'Check Data Network connectivity'
+        ],
+        severity: 'critical',
+        layer: 'Routing'
+    },
+    'PULL_FAILED': {
+        code: '4',
+        name: 'SKB Pull Failed',
+        description: 'Failed to pull/remove bytes from sk_buff header. Cannot parse packet data.',
+        impact: 'Packet parsing failed. Packet is dropped.',
+        possibleCauses: [
+            'Packet too short (truncated)',
+            'Corrupted packet length',
+            'skb data pointer corruption',
+            'Invalid packet structure'
+        ],
+        suggestedActions: [
+            'Capture packets for analysis: tcpdump -i any port 2152 -w capture.pcap',
+            'Check for MTU issues causing truncation',
+            'Verify packet integrity',
+            'Check network interface for errors: ethtool -S <iface>'
+        ],
+        severity: 'critical',
+        layer: 'GTP'
+    },
+    'INVALID_EXT_HDR': {
+        code: '5',
+        name: 'Invalid Extension Header',
+        description: 'GTP-U extension header is malformed or unsupported. Cannot process GTP packet.',
+        impact: 'GTP packet dropped due to invalid extension header.',
+        possibleCauses: [
+            'Unsupported GTP extension header type',
+            'Corrupted extension header',
+            'gNB sending non-standard headers',
+            'Protocol version mismatch',
+            'Packet corruption in transit'
+        ],
+        suggestedActions: [
+            'Capture and analyze GTP packets: tcpdump -i any port 2152',
+            'Check gNB GTP-U implementation',
+            'Verify GTP extension header support in gtp5g',
+            'Update gtp5g module if needed',
+            'Check for network errors causing corruption'
+        ],
+        severity: 'critical',
+        layer: 'GTP'
+    },
+    'NO_PDR': {
+        code: '6',
         name: 'No PDR Match',
-        description: 'Packet Detection Rule (PDR) not found for this packet. The UPF cannot determine how to process the packet.',
-        impact: 'Packet is dropped. User may experience connection timeout or data loss.',
+        description: 'No Packet Detection Rule (PDR) found for this packet. UPF cannot determine how to handle it.',
+        impact: 'Packet dropped. User may experience connection timeout or data loss.',
         possibleCauses: [
             'PDU Session not fully established',
             'PFCP Session Establishment incomplete',
             'SMF failed to create PDR in UPF',
             'Stale session - PDR already deleted',
             'Race condition during handover',
-            'Configuration mismatch between SMF and UPF'
+            'TEID not registered in any PDR'
         ],
         suggestedActions: [
             'Check SMF logs for PFCP errors',
             'Verify PDU Session state in AMF',
-            'Check if UE registration is complete',
-            'Review SMF-UPF PFCP association status',
-            'Check gtp5g kernel module logs: dmesg | grep gtp5g'
+            'Check PFCP association: Review SMF-UPF messages',
+            'List active PDRs in UPF',
+            'Check gtp5g PDR table: cat /proc/gtp5g/*/pdr'
         ],
         severity: 'critical',
         layer: 'PFCP'
     },
-    'INVALID_TEID': {
-        code: '1',
-        name: 'Invalid TEID',
-        description: 'Tunnel Endpoint Identifier (TEID) is unknown or no longer valid. The GTP tunnel cannot be found.',
-        impact: 'GTP packets cannot be processed. Complete connection failure for affected UE.',
+    'GENERAL': {
+        code: '7',
+        name: 'General Error',
+        description: 'Generic error in gtp5g module. Catch-all for unclassified errors.',
+        impact: 'Packet dropped due to unspecified error.',
         possibleCauses: [
-            'Session deleted but packets still in flight',
-            'TEID not yet allocated by SMF',
-            'gNB handover in progress - old TEID invalid',
-            'UPF restart lost TEID mapping',
-            'Malicious packet with fake TEID',
-            'PFCP Session Modification failed'
+            'Unclassified internal error',
+            'Resource allocation failure',
+            'Unexpected packet state',
+            'Module internal inconsistency'
         ],
         suggestedActions: [
-            'Check if PDU Session is active',
-            'Verify TEID allocation in SMF logs',
-            'Check for recent handover events',
-            'Verify UPF session table: look for SEID/TEID mappings',
-            'Review gtp5g tunnel list: cat /proc/gtp5g/*/tunnel'
+            'Check dmesg for detailed errors: dmesg | tail -100',
+            'Review gtp5g module logs',
+            'Check system resources (CPU, memory)',
+            'Consider reloading gtp5g module if persistent'
         ],
-        severity: 'critical',
+        severity: 'warning',
         layer: 'GTP'
     },
-    'QOS_VIOLATION': {
-        code: '2',
-        name: 'QoS Violation',
-        description: 'Packet exceeds QoS policy limits (MBR/GBR thresholds or QFI mismatch).',
-        impact: 'Packet dropped to enforce QoS. May cause temporary throughput reduction.',
+    'UL_GATE_CLOSED': {
+        code: '8',
+        name: 'Uplink Gate Closed',
+        description: 'QoS Enforcement Rule (QER) has uplink gate set to CLOSED. Uplink traffic is blocked.',
+        impact: 'All uplink traffic for this session is blocked by QoS policy.',
         possibleCauses: [
-            'User exceeded Maximum Bit Rate (MBR)',
-            'Traffic burst exceeds token bucket limit',
-            'QFI mismatch between packet and QoS rule',
-            'Congestion control activated',
-            'Rate limiting policy enforced'
+            'QER configured with UL gate=CLOSED',
+            'Session suspended by network',
+            'Charging-related suspension',
+            'Policy decision to block UL traffic',
+            'SMF/PCF policy update'
         ],
         suggestedActions: [
-            'Check session QoS parameters (MBR/GBR)',
-            'Review traffic patterns for the UE',
-            'Verify QER (QoS Enforcement Rule) configuration',
-            'Check if higher bandwidth subscription is needed',
-            'Review QoS flow settings in SMF'
+            'Check QER configuration in UPF',
+            'Review SMF session policy',
+            'Check PCF policy decisions',
+            'Verify charging/billing status',
+            'Check if intentional policy action'
         ],
         severity: 'warning',
         layer: 'QoS'
     },
-    'KERNEL_DROP': {
-        code: '3',
-        name: 'Kernel Drop',
-        description: 'Generic kernel-level packet drop. This can occur at various stages of packet processing.',
-        impact: 'Variable impact depending on the specific kernel drop point.',
+    'DL_GATE_CLOSED': {
+        code: '9',
+        name: 'Downlink Gate Closed',
+        description: 'QoS Enforcement Rule (QER) has downlink gate set to CLOSED. Downlink traffic is blocked.',
+        impact: 'All downlink traffic for this session is blocked by QoS policy.',
         possibleCauses: [
-            'Netfilter/iptables rule blocked packet',
-            'Conntrack table full',
-            'Socket buffer overflow',
-            'Memory pressure',
-            'Rate limiting by kernel',
-            'Invalid packet checksum'
+            'QER configured with DL gate=CLOSED',
+            'Session suspended by network',
+            'Buffering mode enabled (waiting for paging)',
+            'Policy decision to block DL traffic',
+            'UE in idle mode, DL buffering active'
         ],
         suggestedActions: [
-            'Check iptables rules: iptables -L -n -v',
-            'Monitor conntrack: conntrack -L | wc -l',
-            'Check system memory: free -h',
-            'Review dmesg for kernel warnings',
-            'Check network interface drops: ip -s link'
+            'Check QER configuration in UPF',
+            'Verify if UE is in idle mode',
+            'Check if DL buffering is expected',
+            'Review SMF/PCF policy',
+            'Check paging procedure status'
         ],
         severity: 'warning',
-        layer: 'Kernel'
+        layer: 'QoS'
     },
-    'NO_FAR_ACTION': {
-        code: '4',
-        name: 'No FAR Action',
-        description: 'Forwarding Action Rule (FAR) not found or incomplete. UPF does not know where to forward the packet.',
-        impact: 'Packet cannot be forwarded. Similar impact to NO_PDR_MATCH.',
+    'PDR_NULL': {
+        code: '10',
+        name: 'PDR Pointer NULL',
+        description: 'PDR pointer is NULL in processing path. Internal consistency error.',
+        impact: 'Packet dropped due to internal error. Similar to NO_PDR.',
         possibleCauses: [
-            'FAR not yet created by SMF',
-            'FAR deleted before packet arrival',
-            'PFCP Session incomplete',
-            'Configuration error in SMF policy'
+            'Race condition during PDR deletion',
+            'Internal gtp5g state inconsistency',
+            'PDR lookup returned but invalid',
+            'Memory corruption'
         ],
         suggestedActions: [
-            'Check SMF PFCP session state',
-            'Verify FAR creation in SMF logs',
-            'Review PFCP Session Establishment messages',
-            'Check UPF session configuration'
+            'Check for recent PFCP session modifications',
+            'Review gtp5g module logs: dmesg | grep gtp5g',
+            'Verify UPF stability',
+            'Consider UPF restart if persistent'
         ],
         severity: 'critical',
         layer: 'PFCP'
     },
-    'BUFFER_OVERFLOW': {
-        code: '5',
-        name: 'Buffer Overflow',
-        description: 'Ring buffer or packet queue is full. System cannot process packets fast enough.',
-        impact: 'Multiple packets dropped. May indicate system overload.',
-        possibleCauses: [
-            'High traffic load exceeding capacity',
-            'CPU bottleneck on UPF',
-            'Ring buffer size too small',
-            'Slow downstream processing',
-            'Memory allocation failures'
-        ],
-        suggestedActions: [
-            'Monitor CPU usage on UPF server',
-            'Consider scaling UPF horizontally',
-            'Increase ring buffer size if possible',
-            'Check for slow packet processing: perf top',
-            'Review network interface queue length'
-        ],
-        severity: 'critical',
-        layer: 'Kernel'
-    },
-    'TTL_EXPIRED': {
-        code: '6',
-        name: 'TTL Expired',
-        description: 'IP Time-To-Live reached zero. Packet hopped through too many routers.',
-        impact: 'Packet dropped. May indicate routing loop or misconfigured network.',
-        possibleCauses: [
-            'Routing loop in network',
-            'Packet initially sent with low TTL',
-            'Misconfigured static routes',
-            'Traceroute or path discovery packet'
-        ],
-        suggestedActions: [
-            'Check routing table: ip route show',
-            'Trace the packet path: traceroute',
-            'Look for routing loops in network',
-            'Verify default gateway configuration'
-        ],
-        severity: 'warning',
-        layer: 'Routing'
-    },
-    'MTU_EXCEEDED': {
-        code: '7',
-        name: 'MTU Exceeded',
-        description: 'Packet size exceeds Maximum Transmission Unit. GTP encapsulation adds overhead.',
-        impact: 'Large packets dropped. May affect applications sending large data chunks.',
-        possibleCauses: [
-            'Application sending jumbo frames',
-            'Path MTU discovery failed',
-            'GTP overhead not accounted for',
-            'DF (Don\'t Fragment) bit set',
-            'MTU mismatch between network segments'
-        ],
-        suggestedActions: [
-            'Check interface MTU: ip link show',
-            'Verify GTP tunnel MTU (typically 1400 for GTP-U)',
-            'Enable Path MTU Discovery',
-            'Configure proper MTU on UE/gNB',
-            'Consider TCP MSS clamping'
-        ],
-        severity: 'warning',
-        layer: 'GTP'
-    },
-    'MALFORMED_GTP': {
-        code: '8',
-        name: 'Malformed GTP Header',
-        description: 'GTP-U packet header is corrupted or invalid. Cannot parse GTP protocol fields.',
-        impact: 'Packet dropped. May indicate network corruption or attack.',
-        possibleCauses: [
-            'Packet corruption in transit',
-            'Buggy gNB/UPF implementation',
-            'Protocol version mismatch',
-            'Malicious packet injection',
-            'Hardware failure causing bit errors'
-        ],
-        suggestedActions: [
-            'Capture packets for analysis: tcpdump -i any port 2152',
-            'Check for network hardware issues',
-            'Verify gNB software version',
-            'Review GTP-U packet structure',
-            'Check interface error counters: ethtool -S'
-        ],
-        severity: 'critical',
-        layer: 'GTP'
-    },
-    'NO_GTP_TUNNEL': {
-        code: '9',
-        name: 'No GTP Tunnel',
-        description: 'GTP tunnel does not exist in gtp5g kernel module. Tunnel endpoint not established.',
-        impact: 'Cannot process GTP packets. Complete data path failure.',
-        possibleCauses: [
-            'PDU Session not established',
-            'Tunnel deleted during UE mobility',
-            'gtp5g module restart lost state',
-            'PFCP FAR missing Outer Header Creation',
-            'N3 interface not configured properly'
-        ],
-        suggestedActions: [
-            'Check gtp5g tunnels: cat /proc/gtp5g/*/tunnel',
-            'Verify upfgtp interface exists: ip link show upfgtp',
-            'Check PFCP Session state',
-            'Review UPF startup logs',
-            'Verify N3 interface configuration'
-        ],
-        severity: 'critical',
-        layer: 'GTP'
-    },
-    'ENCAP_FAILED': {
-        code: '10',
-        name: 'Encapsulation Failed',
-        description: 'Failed to encapsulate packet in GTP-U tunnel (downlink direction).',
-        impact: 'Downlink packet to UE dropped. UE will not receive data.',
-        possibleCauses: [
-            'Missing outer header creation info',
-            'Invalid gNB F-TEID',
-            'Memory allocation failure',
-            'gtp5g module internal error',
-            'Socket buffer allocation failed'
-        ],
-        suggestedActions: [
-            'Check gtp5g module status: lsmod | grep gtp5g',
-            'Review dmesg for gtp5g errors',
-            'Verify FAR Outer Header Creation parameters',
-            'Check system memory availability',
-            'Verify gNB endpoint IP reachability'
-        ],
-        severity: 'critical',
-        layer: 'GTP'
-    },
-    'DECAP_FAILED': {
+    'NO_F_TEID': {
         code: '11',
-        name: 'Decapsulation Failed',
-        description: 'Failed to decapsulate GTP-U packet (uplink direction). Cannot extract inner IP packet.',
-        impact: 'Uplink data from UE dropped. UE uploads will fail.',
+        name: 'No F-TEID',
+        description: 'Fully Qualified TEID (F-TEID) not found. Cannot identify GTP tunnel endpoint.',
+        impact: 'GTP tunnel lookup failed. Packet cannot be processed.',
         possibleCauses: [
-            'Corrupted GTP header',
-            'Invalid extension headers',
-            'Unsupported GTP version',
-            'gtp5g module bug',
-            'Packet truncation'
+            'TEID not registered in gtp5g',
+            'PDU Session not fully established',
+            'FAR missing outer header creation info',
+            'PFCP Session Establishment incomplete',
+            'Stale TEID reference'
         ],
         suggestedActions: [
-            'Capture and analyze GTP packets',
-            'Check gtp5g module logs',
-            'Verify GTP-U version compatibility',
-            'Update gtp5g module if needed',
-            'Check for packet fragmentation issues'
+            'Check gtp5g tunnel table: cat /proc/gtp5g/*/far',
+            'Verify FAR has Outer Header Creation',
+            'Check PFCP Session Establishment',
+            'Review SMF logs for FAR creation',
+            'Verify TEID allocation'
         ],
         severity: 'critical',
         layer: 'GTP'
     },
-    'ROUTING_DROP': {
+    'URR_REPORT_FAIL': {
         code: '12',
-        name: 'Routing Drop',
-        description: 'Packet dropped due to routing decision. No route to destination or route unreachable.',
-        impact: 'Packet cannot reach destination. Connectivity failure.',
+        name: 'URR Report Failed',
+        description: 'Usage Reporting Rule (URR) report failed to send. Charging/usage data may be lost.',
+        impact: 'Usage report not sent. May affect billing accuracy.',
         possibleCauses: [
-            'No route to destination network',
-            'Next hop unreachable',
-            'Reverse path filtering (rp_filter)',
-            'Policy routing rule blocked',
-            'VRF/namespace routing issue'
+            'PFCP association down',
+            'SMF unreachable',
+            'Report buffer full',
+            'Netlink communication failure'
         ],
         suggestedActions: [
-            'Check routing table: ip route show',
-            'Verify next hop reachability',
-            'Check rp_filter: sysctl net.ipv4.conf.all.rp_filter',
-            'Review policy routing: ip rule show',
-            'Check network namespace configuration'
+            'Check PFCP association status',
+            'Verify SMF connectivity from UPF',
+            'Check UPF report queue',
+            'Review PFCP heartbeat status'
         ],
         severity: 'warning',
-        layer: 'Routing'
+        layer: 'PFCP'
     },
-    'POLICY_DROP': {
+    'RED_PACKET': {
         code: '13',
-        name: 'Policy Drop',
-        description: 'Packet dropped by access control policy (ACL/firewall rule).',
-        impact: 'Traffic blocked by policy. May be intentional security measure.',
+        name: 'RED Packet Drop',
+        description: 'Packet dropped by Random Early Detection (RED) algorithm. QoS congestion control active.',
+        impact: 'Packet dropped to prevent congestion. Normal QoS behavior under load.',
         possibleCauses: [
-            'iptables/nftables rule blocked packet',
-            'UPF access control list',
-            'Security policy enforcement',
-            'Application filter rule',
-            'URL/content filtering'
+            'Queue approaching capacity',
+            'Congestion control activated',
+            'Traffic rate exceeding configured limits',
+            'Token bucket exhausted',
+            'MBR/GBR enforcement'
         ],
         suggestedActions: [
-            'Review firewall rules: iptables -L -n -v',
-            'Check UPF policy configuration',
-            'Verify application detection rules',
-            'Review security policies',
-            'Check if traffic should be allowed'
+            'Check session QoS parameters (MBR/GBR)',
+            'Review traffic load patterns',
+            'Verify QER rate limiting settings',
+            'Consider adjusting QoS parameters',
+            'Check if higher bandwidth is needed'
         ],
         severity: 'info',
-        layer: 'Routing'
+        layer: 'QoS'
     },
-    'MEMORY_ERROR': {
+    'IP_XMIT_FAIL': {
         code: '14',
-        name: 'Memory Error',
-        description: 'Memory allocation failure. System is under memory pressure.',
-        impact: 'Packets dropped due to OOM. System stability at risk.',
+        name: 'IP Transmit Failed',
+        description: 'Failed to transmit IP packet after GTP processing. Network transmission error.',
+        impact: 'Packet not sent to destination. Network connectivity issue.',
         possibleCauses: [
-            'System out of memory',
-            'Memory fragmentation',
-            'Memory leak in kernel module',
-            'Too many sessions consuming memory',
-            'sk_buff allocation failure'
+            'Network interface down',
+            'ARP resolution failed',
+            'Output queue full',
+            'MTU exceeded (needs fragmentation)',
+            'Routing failure at IP layer'
         ],
         suggestedActions: [
-            'Check system memory: free -h',
-            'Monitor OOM killer: dmesg | grep -i oom',
-            'Review session count and memory usage',
-            'Consider adding more RAM',
-            'Check for memory leaks: slabtop'
+            'Check network interface status: ip link show',
+            'Verify ARP table: ip neigh show',
+            'Check interface queue: tc -s qdisc show',
+            'Review MTU settings',
+            'Check for interface errors: ip -s link'
+        ],
+        severity: 'critical',
+        layer: 'Routing'
+    },
+    'NOT_TPDU': {
+        code: '15',
+        name: 'Not T-PDU',
+        description: 'GTP message type is not T-PDU (GTP-U user data). Only T-PDU messages carry user traffic.',
+        impact: 'Non-data GTP message dropped in data path.',
+        possibleCauses: [
+            'GTP control message in data path',
+            'Echo Request/Response misrouted',
+            'Error Indication message',
+            'Unsupported message type',
+            'Protocol confusion'
+        ],
+        suggestedActions: [
+            'Capture GTP packets to identify message type',
+            'Verify GTP-C and GTP-U port separation',
+            'Check gNB GTP implementation',
+            'Review packet routing configuration'
+        ],
+        severity: 'warning',
+        layer: 'GTP'
+    },
+    'PULL_HDR_FAIL': {
+        code: '16',
+        name: 'Header Pull Failed',
+        description: 'Failed to pull GTP/IP header from packet. Similar to PULL_FAILED but header-specific.',
+        impact: 'Cannot extract header. Packet dropped.',
+        possibleCauses: [
+            'Packet too short for expected header',
+            'Header length mismatch',
+            'Corrupted length fields',
+            'Fragmented packet issues'
+        ],
+        suggestedActions: [
+            'Capture packets for analysis',
+            'Check for fragmentation issues',
+            'Verify packet integrity',
+            'Check MTU configuration'
+        ],
+        severity: 'critical',
+        layer: 'GTP'
+    },
+    'NETIF_RX_FAIL': {
+        code: '17',
+        name: 'Netif RX Failed',
+        description: 'netif_rx() call failed. Cannot deliver decapsulated packet to network stack.',
+        impact: 'Uplink packet lost after decapsulation. UE upload fails.',
+        possibleCauses: [
+            'Network stack backlog full',
+            'CPU softirq overloaded',
+            'Memory pressure',
+            'netif_rx queue overflow'
+        ],
+        suggestedActions: [
+            'Check CPU softirq: cat /proc/softirqs',
+            'Monitor netdev backlog: sysctl net.core.netdev_budget',
+            'Check system load: top',
+            'Increase backlog: sysctl -w net.core.netdev_max_backlog=<value>',
+            'Check for packet storms'
         ],
         severity: 'critical',
         layer: 'Kernel'
+    },
+    'UNKNOWN': {
+        code: '255',
+        name: 'Unknown Error',
+        description: 'Unknown or unclassified drop reason. Error code not recognized.',
+        impact: 'Packet dropped for unknown reason.',
+        possibleCauses: [
+            'New error code not yet mapped',
+            'gtp5g module version mismatch',
+            'Corrupted error code',
+            'Internal error'
+        ],
+        suggestedActions: [
+            'Check gtp5g module version',
+            'Review dmesg for errors',
+            'Update 5G-DPOP if gtp5g was updated',
+            'Report issue if persistent'
+        ],
+        severity: 'warning',
+        layer: 'GTP'
     }
 }
 

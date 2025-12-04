@@ -21,23 +21,27 @@ const (
 	DirectionDownlink = 1
 )
 
-// Drop reason constants - Enhanced categories
+// Drop reason constants - Direct mapping from gtp5g error codes (1:1)
+// These match exactly with gtp5g/src/gtpu/encap.c definitions
 const (
-	DropReasonNoPDR          = 0  // No PDR rule matched
-	DropReasonInvalidTEID    = 1  // Invalid or unknown TEID
-	DropReasonQOS            = 2  // QoS policy violation
-	DropReasonKernel         = 3  // Generic kernel drop
-	DropReasonNoFAR          = 4  // No FAR action defined
-	DropReasonBufferOverflow = 5  // Ring buffer or queue overflow
-	DropReasonTTLExpired     = 6  // TTL/Hop limit expired
-	DropReasonMTUExceeded    = 7  // Packet too large
-	DropReasonMalformed      = 8  // Malformed GTP header
-	DropReasonNoTunnel       = 9  // GTP tunnel not found
-	DropReasonEncapFail      = 10 // Encapsulation failed
-	DropReasonDecapFail      = 11 // Decapsulation failed
-	DropReasonRouting        = 12 // Routing decision drop
-	DropReasonPolicy         = 13 // Policy/ACL drop
-	DropReasonMemory         = 14 // Memory allocation failure
+	DropReasonPktDropped     = 1   // Generic packet dropped
+	DropReasonEchoRespCreate = 2   // GTP Echo Response creation failed
+	DropReasonNoRoute        = 3   // No route to destination
+	DropReasonPullFailed     = 4   // skb_pull failed
+	DropReasonInvalidExtHdr  = 5   // Invalid GTP extension header
+	DropReasonNoPDR          = 6   // No PDR rule matched
+	DropReasonGeneral        = 7   // General error
+	DropReasonULGateClosed   = 8   // Uplink gate closed (QoS)
+	DropReasonDLGateClosed   = 9   // Downlink gate closed (QoS)
+	DropReasonPDRNull        = 10  // PDR pointer is NULL
+	DropReasonNoFTEID        = 11  // No F-TEID found
+	DropReasonURRReportFail  = 12  // URR report failed
+	DropReasonREDPacket      = 13  // QoS RED drop
+	DropReasonIPXmitFail     = 14  // IP transmit failed
+	DropReasonNotTPDU        = 15  // Not a T-PDU
+	DropReasonPullHdrFail    = 16  // Header pull failed
+	DropReasonNetifRxFail    = 17  // netif_rx failed
+	DropReasonUnknown        = 255 // Unknown/other reasons
 )
 
 // TrafficCounter represents per-direction traffic statistics
@@ -114,6 +118,25 @@ func (l *Loader) Load() error {
 		return fmt.Errorf("failed to load eBPF objects: %w", err)
 	}
 
+	// =========================================================================
+	// PRIMARY DROP DETECTION: gtp5g_trace_drop
+	// This is the most reliable hook for detecting all types of drops
+	// =========================================================================
+	kpTraceDrop, err := link.Kprobe("gtp5g_trace_drop", l.objs.KprobeGtp5gTraceDrop, nil)
+	if err != nil {
+		log.Printf("Warning: failed to attach kprobe to gtp5g_trace_drop: %v", err)
+		log.Printf("  -> This is the primary drop detection hook!")
+		log.Printf("  -> Make sure gtp5g module is compiled with EXPORT_SYMBOL_GPL(gtp5g_trace_drop)")
+		log.Printf("  -> Rebuild gtp5g: cd /path/to/gtp5g && make clean && make && sudo rmmod gtp5g && sudo insmod gtp5g.ko")
+	} else {
+		l.links = append(l.links, kpTraceDrop)
+		log.Println("✓ Attached kprobe to gtp5g_trace_drop (PRIMARY drop detection)")
+	}
+
+	// =========================================================================
+	// TRAFFIC STATISTICS: gtp5g_encap_recv and gtp5g_dev_xmit
+	// =========================================================================
+
 	// Attach kprobe to gtp5g_encap_recv
 	kpEncapRecv, err := link.Kprobe("gtp5g_encap_recv", l.objs.KprobeGtp5gEncapRecv, nil)
 	if err != nil {
@@ -121,16 +144,7 @@ func (l *Loader) Load() error {
 		log.Printf("Make sure gtp5g module is loaded: sudo insmod /path/to/gtp5g.ko")
 	} else {
 		l.links = append(l.links, kpEncapRecv)
-		log.Println("Attached kprobe to gtp5g_encap_recv")
-	}
-
-	// Attach kretprobe to gtp5g_encap_recv for drop detection
-	krpEncapRecv, err := link.Kretprobe("gtp5g_encap_recv", l.objs.KretprobeGtp5gEncapRecv, nil)
-	if err != nil {
-		log.Printf("Warning: failed to attach kretprobe to gtp5g_encap_recv: %v", err)
-	} else {
-		l.links = append(l.links, krpEncapRecv)
-		log.Println("Attached kretprobe to gtp5g_encap_recv")
+		log.Println("✓ Attached kprobe to gtp5g_encap_recv (uplink traffic stats)")
 	}
 
 	// Attach kprobe to gtp5g_dev_xmit
@@ -139,17 +153,13 @@ func (l *Loader) Load() error {
 		log.Printf("Warning: failed to attach kprobe to gtp5g_dev_xmit: %v", err)
 	} else {
 		l.links = append(l.links, kpDevXmit)
-		log.Println("Attached kprobe to gtp5g_dev_xmit")
+		log.Println("✓ Attached kprobe to gtp5g_dev_xmit (downlink traffic stats)")
 	}
 
-	// Attach kretprobe to gtp5g_dev_xmit for drop detection
-	krpDevXmit, err := link.Kretprobe("gtp5g_dev_xmit", l.objs.KretprobeGtp5gDevXmit, nil)
-	if err != nil {
-		log.Printf("Warning: failed to attach kretprobe to gtp5g_dev_xmit: %v", err)
-	} else {
-		l.links = append(l.links, krpDevXmit)
-		log.Println("Attached kretprobe to gtp5g_dev_xmit")
-	}
+	// =========================================================================
+	// SECONDARY DROP DETECTION: PDR lookup failures
+	// These catch drops before gtp5g_trace_drop is called in some code paths
+	// =========================================================================
 
 	// Attach kretprobe to pdr_find_by_gtp1u for NO_PDR_MATCH detection (uplink)
 	krpPdrFindGtp1u, err := link.Kretprobe("pdr_find_by_gtp1u", l.objs.KretprobePdrFindByGtp1u, nil)
@@ -157,7 +167,7 @@ func (l *Loader) Load() error {
 		log.Printf("Warning: failed to attach kretprobe to pdr_find_by_gtp1u: %v", err)
 	} else {
 		l.links = append(l.links, krpPdrFindGtp1u)
-		log.Println("Attached kretprobe to pdr_find_by_gtp1u")
+		log.Println("✓ Attached kretprobe to pdr_find_by_gtp1u (uplink PDR lookup)")
 	}
 
 	// Attach kretprobe to pdr_find_by_ipv4 for NO_PDR_MATCH detection (downlink)
@@ -166,8 +176,13 @@ func (l *Loader) Load() error {
 		log.Printf("Warning: failed to attach kretprobe to pdr_find_by_ipv4: %v", err)
 	} else {
 		l.links = append(l.links, krpPdrFindIpv4)
-		log.Println("Attached kretprobe to pdr_find_by_ipv4")
+		log.Println("✓ Attached kretprobe to pdr_find_by_ipv4 (downlink PDR lookup)")
 	}
+
+	// =========================================================================
+	// OPTIONAL: General kernel drop tracing (disabled by default)
+	// Enable with loader.EnableDropTracing(true)
+	// =========================================================================
 
 	// Attach tracepoint for kfree_skb
 	tpKfreeSkb, err := link.Tracepoint("skb", "kfree_skb", l.objs.TracepointKfreeSkb, nil)
@@ -175,7 +190,7 @@ func (l *Loader) Load() error {
 		log.Printf("Warning: failed to attach tracepoint to kfree_skb: %v", err)
 	} else {
 		l.links = append(l.links, tpKfreeSkb)
-		log.Println("Attached tracepoint to skb/kfree_skb")
+		log.Println("✓ Attached tracepoint to skb/kfree_skb (general kernel drops, disabled by default)")
 	}
 
 	// Open ring buffer for drop events
@@ -415,38 +430,43 @@ func FormatIP(ip uint32) string {
 }
 
 // FormatDropReason converts drop reason code to string
+// Direct 1:1 mapping with gtp5g error codes
 func FormatDropReason(reason uint8) string {
 	switch reason {
+	case DropReasonPktDropped:
+		return "PKT_DROPPED"
+	case DropReasonEchoRespCreate:
+		return "ECHO_RESP_CREATE"
+	case DropReasonNoRoute:
+		return "NO_ROUTE"
+	case DropReasonPullFailed:
+		return "PULL_FAILED"
+	case DropReasonInvalidExtHdr:
+		return "INVALID_EXT_HDR"
 	case DropReasonNoPDR:
-		return "NO_PDR_MATCH"
-	case DropReasonInvalidTEID:
-		return "INVALID_TEID"
-	case DropReasonQOS:
-		return "QOS_VIOLATION"
-	case DropReasonKernel:
-		return "KERNEL_DROP"
-	case DropReasonNoFAR:
-		return "NO_FAR_ACTION"
-	case DropReasonBufferOverflow:
-		return "BUFFER_OVERFLOW"
-	case DropReasonTTLExpired:
-		return "TTL_EXPIRED"
-	case DropReasonMTUExceeded:
-		return "MTU_EXCEEDED"
-	case DropReasonMalformed:
-		return "MALFORMED_GTP"
-	case DropReasonNoTunnel:
-		return "NO_GTP_TUNNEL"
-	case DropReasonEncapFail:
-		return "ENCAP_FAILED"
-	case DropReasonDecapFail:
-		return "DECAP_FAILED"
-	case DropReasonRouting:
-		return "ROUTING_DROP"
-	case DropReasonPolicy:
-		return "POLICY_DROP"
-	case DropReasonMemory:
-		return "MEMORY_ERROR"
+		return "NO_PDR"
+	case DropReasonGeneral:
+		return "GENERAL"
+	case DropReasonULGateClosed:
+		return "UL_GATE_CLOSED"
+	case DropReasonDLGateClosed:
+		return "DL_GATE_CLOSED"
+	case DropReasonPDRNull:
+		return "PDR_NULL"
+	case DropReasonNoFTEID:
+		return "NO_F_TEID"
+	case DropReasonURRReportFail:
+		return "URR_REPORT_FAIL"
+	case DropReasonREDPacket:
+		return "RED_PACKET"
+	case DropReasonIPXmitFail:
+		return "IP_XMIT_FAIL"
+	case DropReasonNotTPDU:
+		return "NOT_TPDU"
+	case DropReasonPullHdrFail:
+		return "PULL_HDR_FAIL"
+	case DropReasonNetifRxFail:
+		return "NETIF_RX_FAIL"
 	default:
 		return "UNKNOWN"
 	}

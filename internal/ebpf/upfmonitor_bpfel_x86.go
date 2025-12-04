@@ -81,10 +81,9 @@ type upfMonitorProgramSpecs struct {
 	KprobeGtp5gDevXmit      *ebpf.ProgramSpec `ebpf:"kprobe_gtp5g_dev_xmit"`
 	KprobeGtp5gEncapRecv    *ebpf.ProgramSpec `ebpf:"kprobe_gtp5g_encap_recv"`
 	KprobeGtp5gHandleSkb    *ebpf.ProgramSpec `ebpf:"kprobe_gtp5g_handle_skb"`
+	KprobeGtp5gTraceDrop    *ebpf.ProgramSpec `ebpf:"kprobe_gtp5g_trace_drop"`
 	KprobeIpForward         *ebpf.ProgramSpec `ebpf:"kprobe_ip_forward"`
 	KprobeNfHookSlow        *ebpf.ProgramSpec `ebpf:"kprobe_nf_hook_slow"`
-	KretprobeGtp5gDevXmit   *ebpf.ProgramSpec `ebpf:"kretprobe_gtp5g_dev_xmit"`
-	KretprobeGtp5gEncapRecv *ebpf.ProgramSpec `ebpf:"kretprobe_gtp5g_encap_recv"`
 	KretprobeIpForward      *ebpf.ProgramSpec `ebpf:"kretprobe_ip_forward"`
 	KretprobePdrFindByGtp1u *ebpf.ProgramSpec `ebpf:"kretprobe_pdr_find_by_gtp1u"`
 	KretprobePdrFindByIpv4  *ebpf.ProgramSpec `ebpf:"kretprobe_pdr_find_by_ipv4"`
@@ -154,10 +153,9 @@ type upfMonitorPrograms struct {
 	KprobeGtp5gDevXmit      *ebpf.Program `ebpf:"kprobe_gtp5g_dev_xmit"`
 	KprobeGtp5gEncapRecv    *ebpf.Program `ebpf:"kprobe_gtp5g_encap_recv"`
 	KprobeGtp5gHandleSkb    *ebpf.Program `ebpf:"kprobe_gtp5g_handle_skb"`
+	KprobeGtp5gTraceDrop    *ebpf.Program `ebpf:"kprobe_gtp5g_trace_drop"`
 	KprobeIpForward         *ebpf.Program `ebpf:"kprobe_ip_forward"`
 	KprobeNfHookSlow        *ebpf.Program `ebpf:"kprobe_nf_hook_slow"`
-	KretprobeGtp5gDevXmit   *ebpf.Program `ebpf:"kretprobe_gtp5g_dev_xmit"`
-	KretprobeGtp5gEncapRecv *ebpf.Program `ebpf:"kretprobe_gtp5g_encap_recv"`
 	KretprobeIpForward      *ebpf.Program `ebpf:"kretprobe_ip_forward"`
 	KretprobePdrFindByGtp1u *ebpf.Program `ebpf:"kretprobe_pdr_find_by_gtp1u"`
 	KretprobePdrFindByIpv4  *ebpf.Program `ebpf:"kretprobe_pdr_find_by_ipv4"`
@@ -169,10 +167,9 @@ func (p *upfMonitorPrograms) Close() error {
 		p.KprobeGtp5gDevXmit,
 		p.KprobeGtp5gEncapRecv,
 		p.KprobeGtp5gHandleSkb,
+		p.KprobeGtp5gTraceDrop,
 		p.KprobeIpForward,
 		p.KprobeNfHookSlow,
-		p.KretprobeGtp5gDevXmit,
-		p.KretprobeGtp5gEncapRecv,
 		p.KretprobeIpForward,
 		p.KretprobePdrFindByGtp1u,
 		p.KretprobePdrFindByIpv4,

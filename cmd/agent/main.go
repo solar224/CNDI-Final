@@ -158,8 +158,9 @@ func main() {
 		reason := ebpf.FormatDropReason(event.Reason)
 		direction := ebpf.FormatDirection(event.Direction)
 
-		log.Printf("[DROP] reason=%s direction=%s teid=0x%x src=%s dst=%s len=%d",
-			reason, direction,
+		// DEBUG: Show raw reason code to debug
+		log.Printf("[DROP] reason=%s(code=%d) direction=%s teid=0x%x src=%s dst=%s len=%d",
+			reason, event.Reason, direction,
 			event.TEID,
 			ebpf.FormatIP(event.SrcIP),
 			ebpf.FormatIP(event.DstIP),
@@ -632,7 +633,7 @@ func handleDemoInjectDrop(w http.ResponseWriter, r *http.Request) {
 		Direction string `json:"direction"`
 		Count     int    `json:"count"`
 	}
-	req.Reason = "INVALID_TEID"
+	req.Reason = "NO_PDR"
 	req.Direction = "uplink"
 	req.Count = 1
 
@@ -646,32 +647,36 @@ func handleDemoInjectDrop(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Realistic drop reasons with weighted probabilities
-	// Based on real-world 5G UPF scenarios
+	// Direct 1:1 mapping with gtp5g error codes (codes 1-17)
 	type dropReasonWeight struct {
 		reason string
 		weight int // Higher weight = more likely to occur
 	}
 	weightedReasons := []dropReasonWeight{
 		// Common drops (high probability)
-		{"INVALID_TEID", 25},  // Most common: stale sessions, race conditions
-		{"NO_PDR_MATCH", 20},  // Common: configuration issues, timing
-		{"NO_GTP_TUNNEL", 15}, // Common: session not fully established
-		{"KERNEL_DROP", 10},   // Common: various kernel-level drops
-		{"ROUTING_DROP", 8},   // Moderately common: routing issues
+		{"NO_PDR", 25},    // Code 6: Most common - no matching PDR
+		{"NO_F_TEID", 20}, // Code 11: Common - TEID not found
+		{"NO_ROUTE", 15},  // Code 3: Common - routing issues
+		{"GENERAL", 10},   // Code 7: Generic errors
+		{"PDR_NULL", 8},   // Code 10: PDR pointer null
 
-		// Less common drops
-		{"TTL_EXPIRED", 5},   // Occasional: routing loops
-		{"DECAP_FAILED", 4},  // Occasional: malformed packets
-		{"ENCAP_FAILED", 4},  // Occasional: resource issues
-		{"MALFORMED_GTP", 3}, // Rare: corrupted packets
-		{"MTU_EXCEEDED", 3},  // Rare: jumbo frames without fragmentation
+		// Moderately common drops
+		{"INVALID_EXT_HDR", 5}, // Code 5: Extension header issues
+		{"PULL_FAILED", 4},     // Code 4: skb_pull failed
+		{"PULL_HDR_FAIL", 4},   // Code 16: Header pull failed
+		{"IP_XMIT_FAIL", 3},    // Code 14: IP transmit failed
+		{"NETIF_RX_FAIL", 3},   // Code 17: netif_rx failed
 
-		// Rare drops (require specific conditions)
-		{"QOS_VIOLATION", 1},   // Rare: needs QoS policy enforcement
-		{"POLICY_DROP", 1},     // Rare: needs ACL rules
-		{"NO_FAR_ACTION", 0},   // Very rare: incomplete configuration (disabled)
-		{"BUFFER_OVERFLOW", 0}, // Very rare: extreme load (disabled)
-		{"MEMORY_ERROR", 0},    // Very rare: system under pressure (disabled)
+		// QoS related drops
+		{"RED_PACKET", 5},     // Code 13: QoS RED drop
+		{"UL_GATE_CLOSED", 3}, // Code 8: Uplink gate closed
+		{"DL_GATE_CLOSED", 3}, // Code 9: Downlink gate closed
+
+		// Rare drops
+		{"NOT_TPDU", 2},         // Code 15: Not a T-PDU
+		{"PKT_DROPPED", 1},      // Code 1: Generic drop
+		{"ECHO_RESP_CREATE", 1}, // Code 2: Echo response failed
+		{"URR_REPORT_FAIL", 1},  // Code 12: URR report failed
 	}
 
 	// Calculate total weight
@@ -690,7 +695,7 @@ func handleDemoInjectDrop(w http.ResponseWriter, r *http.Request) {
 				return wr.reason
 			}
 		}
-		return "INVALID_TEID" // fallback
+		return "NO_PDR" // fallback
 	}
 
 	// Direction distribution: Uplink drops are slightly more common in real scenarios

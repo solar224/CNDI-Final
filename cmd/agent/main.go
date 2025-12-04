@@ -102,6 +102,7 @@ type SessionJSON struct {
 	// Extended fields
 	UPFIP       string `json:"upf_ip,omitempty"`
 	GNBIP       string `json:"gnb_ip,omitempty"`
+	UplinkPeerIP string `json:"uplink_peer_ip,omitempty"`
 	SUPI        string `json:"supi,omitempty"`
 	DNN         string `json:"dnn,omitempty"`
 	SNssai      string `json:"s_nssai,omitempty"`
@@ -197,6 +198,25 @@ func main() {
 		log.Fatalf("Failed to load eBPF programs: %v", err)
 	}
 	defer loader.Close()
+
+	// Enable detailed tracing for topology discovery
+	if err := loader.EnableDetailedTracing(true); err != nil {
+		log.Printf("[WARN] Failed to enable detailed tracing: %v", err)
+	} else {
+		log.Println("[INFO] Detailed tracing enabled for topology discovery")
+	}
+
+	// Set up packet event handler
+	loader.OnPacketEvent = func(event ebpf.PacketEvent) {
+		// Only interested in Uplink packets to discover Uplink Peer (gNB or prev UPF)
+		if event.Direction == ebpf.DirectionUplink && event.TEID > 0 {
+			// Convert uint32 IP to net.IP
+			srcIP := net.IPv4(byte(event.SrcIP), byte(event.SrcIP>>8), byte(event.SrcIP>>16), byte(event.SrcIP>>24))
+			
+			// Update session with Uplink Peer IP
+			pfcpCorrelation.UpdateUplinkPeer(event.TEID, srcIP)
+		}
+	}
 
 	// Store loader globally for API access
 	ebpfLoader = loader
@@ -340,6 +360,11 @@ func handleSessionsAPI(w http.ResponseWriter, r *http.Request) {
 			gnbIP = s.GNBIP.String()
 		}
 
+		uplinkPeerIP := ""
+		if s.UplinkPeerIP != nil {
+			uplinkPeerIP = s.UplinkPeerIP.String()
+		}
+
 		// Calculate duration
 		duration := time.Since(s.CreatedAt)
 		durationStr := formatDuration(duration)
@@ -368,6 +393,7 @@ func handleSessionsAPI(w http.ResponseWriter, r *http.Request) {
 			// Extended fields
 			UPFIP:       upfIP,
 			GNBIP:       gnbIP,
+			UplinkPeerIP: uplinkPeerIP,
 			SUPI:        s.SUPI,
 			DNN:         s.DNN,
 			SNssai:      s.SNssai,

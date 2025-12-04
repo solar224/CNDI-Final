@@ -89,8 +89,9 @@ type SessionInfo struct {
 type Loader struct {
 	objs     *upfMonitorObjects
 	links    []link.Link
-	reader   *ringbuf.Reader
-	stopChan chan struct{}
+	reader       *ringbuf.Reader
+	packetReader *ringbuf.Reader
+	stopChan     chan struct{}
 
 	// Callbacks for events
 	OnDropEvent   func(event DropEvent)
@@ -198,12 +199,19 @@ func (l *Loader) Load() error {
 		return fmt.Errorf("failed to create ring buffer reader: %w", err)
 	}
 
+	// Open ring buffer for packet events
+	l.packetReader, err = ringbuf.NewReader(l.objs.PacketEvents)
+	if err != nil {
+		return fmt.Errorf("failed to create packet ring buffer reader: %w", err)
+	}
+
 	return nil
 }
 
 // StartEventLoop starts processing events from ring buffers
 func (l *Loader) StartEventLoop() {
 	go l.readDropEvents()
+	go l.readPacketEvents()
 }
 
 func (l *Loader) readDropEvents() {
@@ -402,6 +410,10 @@ func (l *Loader) Close() {
 		l.reader.Close()
 	}
 
+	if l.packetReader != nil {
+		l.packetReader.Close()
+	}
+
 	for _, lnk := range l.links {
 		lnk.Close()
 	}
@@ -475,4 +487,42 @@ func FormatDirection(direction uint8) string {
 // FormatTimestamp converts nanosecond timestamp to time.Time
 func FormatTimestamp(ns uint64) time.Time {
 	return time.Unix(0, int64(ns))
+}
+
+func (l *Loader) readPacketEvents() {
+	for {
+		select {
+			case <-l.stopChan:
+				return
+				default:
+		}
+
+		record, err := l.packetReader.Read()
+		if err != nil {
+			if errors.Is(err, ringbuf.ErrClosed) {
+				return
+			}
+			log.Printf("Error reading from packet ring buffer: %v", err)
+			continue
+		}
+
+	// Parse packet event
+		if len(record.RawSample) < 24 {
+			continue
+		}
+
+		event := PacketEvent{
+			Timestamp: binary.LittleEndian.Uint64(record.RawSample[0:8]),
+			TEID:      binary.LittleEndian.Uint32(record.RawSample[8:12]),
+			SrcIP:     binary.LittleEndian.Uint32(record.RawSample[12:16]),
+			DstIP:     binary.LittleEndian.Uint32(record.RawSample[16:20]),
+			PktLen:    binary.LittleEndian.Uint32(record.RawSample[20:24]),
+			Direction: record.RawSample[24],
+			QFI:       record.RawSample[25],
+		}
+
+		if l.OnPacketEvent != nil {
+			l.OnPacketEvent(event)
+		}
+	}
 }

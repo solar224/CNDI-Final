@@ -70,6 +70,7 @@ type SessionInfo struct {
 	// Extended fields
 	UPFIP       string `json:"upf_ip,omitempty"`
 	GNBIP       string `json:"gnb_ip,omitempty"`
+	UplinkPeerIP string `json:"uplink_peer_ip,omitempty"`
 	SUPI        string `json:"supi,omitempty"`
 	DNN         string `json:"dnn,omitempty"`
 	SNssai      string `json:"s_nssai,omitempty"`
@@ -169,6 +170,7 @@ func (s *Server) setupRoutes() {
 		api.GET("/metrics/drops", s.handleDropMetrics)
 		api.GET("/sessions", s.handleSessions)
 		api.GET("/sessions/:seid", s.handleSessionDetail)
+		api.GET("/topology", s.handleTopology)
 		api.POST("/fault/inject", s.handleFaultInject)
 
 		// Proxy demo APIs to agent
@@ -624,3 +626,162 @@ func parseNumber(s string) uint64 {
 
 // Ensure json and other imports are used
 var _ = json.Marshal
+
+// TopologyNode represents a node in the topology
+type TopologyNode struct {
+	ID    string `json:"id"`
+	Type  string `json:"type"` // "ue", "upf", "gnb", "dn"
+	Label string `json:"label"`
+	IP    string `json:"ip"`
+}
+
+// TopologyLink represents a link in the topology
+type TopologyLink struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Label  string `json:"label"` // e.g. SEID
+	Type   string `json:"type"`  // "n3", "n4", "n6", "n9"
+}
+
+// Topology represents the network topology
+type Topology struct {
+	Nodes []TopologyNode `json:"nodes"`
+	Links []TopologyLink `json:"links"`
+}
+
+func (s *Server) handleTopology(c *gin.Context) {
+	s.statsMu.RLock()
+	defer s.statsMu.RUnlock()
+
+	nodes := make(map[string]TopologyNode)
+	links := make([]TopologyLink, 0)
+
+	// Pass 1: Identify all UPFs and UEs first
+	for _, session := range s.sessions {
+		// UE Node
+		if session.UEIP != "" {
+			nodes[session.UEIP] = TopologyNode{
+				ID:    session.UEIP,
+				Type:  "ue",
+				Label: "UE " + session.UEIP,
+				IP:    session.UEIP,
+			}
+		}
+
+		// UPF Node
+		upfIP := session.UPFIP
+		if upfIP == "" {
+			upfIP = "UPF-Local" // Fallback
+		}
+		nodes[upfIP] = TopologyNode{
+			ID:    upfIP,
+			Type:  "upf",
+			Label: "UPF " + upfIP,
+			IP:    upfIP,
+		}
+	}
+
+	// Pass 2: Identify Peers (gNB or other UPFs)
+	for _, session := range s.sessions {
+		upfIP := session.UPFIP
+		if upfIP == "" {
+			upfIP = "UPF-Local"
+		}
+
+		// Determine Access Peer (gNB)
+		// Prefer UplinkPeerIP (actual source of UL traffic) if available
+		accessPeerIP := session.UplinkPeerIP
+		if accessPeerIP == "" {
+			accessPeerIP = session.GNBIP // Fallback to signaled IP
+		}
+
+		// Handle Access Peer (gNB)
+		if accessPeerIP != "" {
+			// Only create if not exists (don't overwrite UPF)
+			if _, exists := nodes[accessPeerIP]; !exists {
+				nodes[accessPeerIP] = TopologyNode{
+					ID:    accessPeerIP,
+					Type:  "gnb", // Default to gNB for access peer
+					Label: "Peer " + accessPeerIP,
+					IP:    accessPeerIP,
+				}
+			}
+
+			// Link: Access Peer -> UPF (N3)
+			links = append(links, TopologyLink{
+				Source: accessPeerIP,
+				Target: upfIP,
+				Label:  "N3",
+				Type:   "n3",
+			})
+
+			// Link: UE -> Access Peer (Radio)
+			// Only create this link if we haven't already (to avoid duplicates)
+			// And only if this session has a UE
+			if session.UEIP != "" {
+				links = append(links, TopologyLink{
+					Source: session.UEIP,
+					Target: accessPeerIP,
+					Label:  "Radio",
+					Type:   "radio",
+				})
+			}
+		}
+
+		// Handle Core Peer (PSA-UPF in ULCL scenario)
+		// If GNBIP is present and different from Access Peer, it's likely the Core-side UPF
+		if session.GNBIP != "" && session.GNBIP != accessPeerIP {
+			corePeerIP := session.GNBIP
+			
+			// Only create if not exists
+			if _, exists := nodes[corePeerIP]; !exists {
+				nodes[corePeerIP] = TopologyNode{
+					ID:    corePeerIP,
+					Type:  "upf", // Heuristic: Core peer of a UPF is likely another UPF
+					Label: "UPF " + corePeerIP,
+					IP:    corePeerIP,
+				}
+			}
+
+			// Link: UPF -> Core Peer (N9)
+			links = append(links, TopologyLink{
+				Source: upfIP,
+				Target: corePeerIP,
+				Label:  "N9",
+				Type:   "n9",
+			})
+		}
+	}
+
+	// Add DN Node
+	dnID := "DN-Internet"
+	nodes[dnID] = TopologyNode{
+		ID:    dnID,
+		Type:  "dn",
+		Label: "Data Network",
+		IP:    "Internet",
+	}
+
+	// Link UPF -> DN (for each UPF)
+	for _, n := range nodes {
+		if n.Type == "upf" {
+			links = append(links, TopologyLink{
+				Source: n.ID,
+				Target: dnID,
+				Label:  "N6",
+				Type:   "n6",
+			})
+		}
+	}
+
+	// Convert map to slice
+	nodeList := make([]TopologyNode, 0, len(nodes))
+	for _, n := range nodes {
+		nodeList = append(nodeList, n)
+	}
+
+	c.JSON(http.StatusOK, Topology{
+		Nodes: nodeList,
+		Links: links,
+	})
+}

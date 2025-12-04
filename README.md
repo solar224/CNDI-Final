@@ -582,6 +582,8 @@ make compose-up
 
 # Terminal 2: Start Agent (requires root)
 sudo ./bin/agent
+# For free5gc-compose, specify the name of the Docker bridge network.
+# sudo ./bin/agent -pfcp-iface br-free5gc
 
 # Terminal 3: Start API Server
 ./bin/api-server

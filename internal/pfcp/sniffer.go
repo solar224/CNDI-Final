@@ -61,7 +61,8 @@ type Session struct {
 	RemoteSEID uint64
 	UEIP       net.IP
 	UPFIP      net.IP
-	GNBIP      net.IP   // gNodeB IP address
+	GNBIP      net.IP   // Downlink Peer IP (gNB or next UPF)
+	UplinkPeerIP net.IP // Uplink Peer IP (gNB or prev UPF)
 	TEIDs      []uint32 // Associated GTP TEIDs
 	CreatedAt  time.Time
 	ModifiedAt time.Time
@@ -869,4 +870,19 @@ func (s *Sniffer) parseIEsRecursive(ieData []byte, callback func(ieType uint16, 
 // GetCorrelation returns the correlation store
 func (s *Sniffer) GetCorrelation() *Correlation {
 	return s.correlation
+}
+
+// UpdateUplinkPeer updates the uplink peer IP for a session
+func (c *Correlation) UpdateUplinkPeer(teid uint32, peerIP net.IP) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if seid, ok := c.teidMap[teid]; ok {
+		if session, ok := c.sessions[seid]; ok {
+			if session.UplinkPeerIP == nil || !session.UplinkPeerIP.Equal(peerIP) {
+				session.UplinkPeerIP = peerIP
+				log.Printf("[PFCP] Updated Uplink Peer IP for SEID 0x%x: %s", session.SEID, peerIP)
+			}
+		}
+	}
 }

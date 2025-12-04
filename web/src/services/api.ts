@@ -427,6 +427,25 @@ export interface SessionInfo {
     last_active?: string
 }
 
+export interface TopologyNode {
+    id: string
+    type: 'ue' | 'gnb' | 'upf' | 'dn'
+    label: string
+    ip?: string
+}
+
+export interface TopologyLink {
+    source: string
+    target: string
+    type: 'n3' | 'n4' | 'n6' | 'n9'
+    label?: string
+}
+
+export interface TopologyData {
+    nodes: TopologyNode[]
+    links: TopologyLink[]
+}
+
 // API Functions
 const API_BASE = '/api/v1'
 
@@ -451,6 +470,12 @@ export async function fetchDropMetrics(): Promise<DropStats> {
 export async function fetchSessions(): Promise<{ total: number; sessions: SessionInfo[] }> {
     const response = await fetch(`${API_BASE}/sessions`)
     if (!response.ok) throw new Error('Failed to fetch sessions')
+    return response.json()
+}
+
+export async function fetchTopology(): Promise<TopologyData> {
+    const response = await fetch(`${API_BASE}/topology`)
+    if (!response.ok) throw new Error('Failed to fetch topology')
     return response.json()
 }
 

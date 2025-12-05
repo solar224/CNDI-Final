@@ -692,8 +692,19 @@ func (s *Server) handleTopology(c *gin.Context) {
 		// Determine Access Peer (gNB)
 		// Prefer UplinkPeerIP (actual source of UL traffic) if available
 		accessPeerIP := session.UplinkPeerIP
+
+		// Sanity check: Access Peer cannot be the UPF itself
+		if accessPeerIP == upfIP {
+			accessPeerIP = ""
+		}
+
 		if accessPeerIP == "" {
 			accessPeerIP = session.GNBIP // Fallback to signaled IP
+		}
+
+		// Sanity check again
+		if accessPeerIP == upfIP {
+			accessPeerIP = ""
 		}
 
 		// Handle Access Peer (gNB)

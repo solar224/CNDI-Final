@@ -735,8 +735,14 @@ func hasActiveFlowToLocalBreakout(session SessionInfo) bool {
 			}
 		}
 	}
-	// If no flow tracking data, fall back to session-level activity
-	if len(session.FlowTraffic) == 0 {
+	// If no flow tracking data and this is a ULCL session (has N9PeerIP),
+	// we can't determine if it's local breakout - return true for I-UPF N6
+	// since all traffic goes through I-UPF first
+	if len(session.FlowTraffic) == 0 && session.N9PeerIP != "" {
+		return isSessionActive(session)
+	}
+	// For non-ULCL sessions, fall back to session-level activity
+	if len(session.FlowTraffic) == 0 && session.N9PeerIP == "" {
 		return isSessionActive(session)
 	}
 	return false
@@ -998,11 +1004,11 @@ func (s *Server) handleTopology(c *gin.Context) {
 				activity := activeLinkTraffic[linkKey]
 
 				// Use per-flow tracking to determine N9 activity
+				// Without per-flow data, N9 should NOT be active by default
+				// because we can't distinguish local breakout from anchor traffic
 				n9Active := hasActiveFlowToN9Peer(session)
-				// Fallback to session-level if no flow data
-				if !n9Active && len(session.FlowTraffic) == 0 {
-					n9Active = activity.active || sessionActive
-				}
+				// Note: NO fallback - if no flow data, N9 stays inactive
+				// This prevents all paths from lighting up when we can't track flows
 
 				links = append(links, TopologyLink{
 					Source:           iUpfIP,
@@ -1032,8 +1038,8 @@ func (s *Server) handleTopology(c *gin.Context) {
 	// - PSA-UPF N6 link is active only for traffic that came through N9
 
 	// Track per-UPF activity based on flow-level tracking
-	upfLocalActivity := make(map[string]bool)  // For I-UPF local breakout
-	upfN9Activity := make(map[string]bool)     // For PSA-UPF (traffic via N9)
+	upfLocalActivity := make(map[string]bool) // For I-UPF local breakout
+	upfN9Activity := make(map[string]bool)    // For PSA-UPF (traffic via N9)
 	upfTrafficRate := make(map[string]float64)
 
 	for _, session := range s.sessions {
@@ -1073,19 +1079,9 @@ func (s *Server) handleTopology(c *gin.Context) {
 				// Check both local breakout activity and N9-forwarded activity
 				hasActive := upfLocalActivity[n.ID] || upfN9Activity[n.ID]
 
-				// Fallback: if no flow tracking data, use session-level activity
-				if !hasActive {
-					for _, session := range s.sessions {
-						sessUPF := session.UPFIP
-						if sessUPF == "" {
-							sessUPF = "UPF-Local"
-						}
-						if sessUPF == n.ID && len(session.FlowTraffic) == 0 && isSessionActive(session) {
-							hasActive = true
-							break
-						}
-					}
-				}
+				// Note: No general fallback for N6 in ULCL mode
+				// upfLocalActivity is already set for I-UPF when session is active
+				// PSA-UPF N6 only lights up when we have flow data showing N9 traffic
 
 				links = append(links, TopologyLink{
 					Source:           n.ID,
